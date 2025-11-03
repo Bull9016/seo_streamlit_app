@@ -89,6 +89,12 @@ def parse_html_to_text(html):
 
 @st.cache_data
 def process_and_extract(df):
+    # Check if data already has the extracted content
+    if all(col in df.columns for col in ["title", "body_text", "word_count"]):
+        df.to_csv(EXTRACTED_CSV, index=False)
+        return df
+    
+    # If not, extract from html_content
     results = []
     for i, row in df.iterrows():
         url = row.get("url", "")
@@ -104,6 +110,29 @@ def process_and_extract(df):
     # Save extracted csv
     extracted.to_csv(EXTRACTED_CSV, index=False)
     return extracted
+
+
+def load_extracted_csv():
+    """Safely load the extracted CSV. Returns a DataFrame or None if file missing/empty/invalid."""
+    try:
+        if not os.path.exists(EXTRACTED_CSV):
+            return None
+        # empty-file check
+        if os.path.getsize(EXTRACTED_CSV) == 0:
+            return None
+        df = pd.read_csv(EXTRACTED_CSV)
+        if df is None or df.empty:
+            return None
+        return df
+    except pd.errors.EmptyDataError:
+        return None
+    except Exception as e:
+        # Avoid crashing the app for read issues; surface a message in the UI when appropriate
+        try:
+            st.error(f"Failed to read {EXTRACTED_CSV}: {e}")
+        except Exception:
+            pass
+        return None
 
 @st.cache_data
 def compute_features(df_extracted):
@@ -354,14 +383,37 @@ elif choice == "Quality Model":
         st.pyplot(fig2)
     # Final predictions table
     if 'quality_model' in st.session_state:
-        clf = st.session_state['quality_model']
-        X = df_feat[["word_count","sentence_count","flesch_reading_ease"]].fillna(0)
-        preds = clf.predict(X)
-        df_out = df_feat.copy()
-        df_out["predicted_quality"] = preds
-        st.subheader("Predicted Quality for all URLs")
-        st.dataframe(df_out[["url","title","word_count","flesch_reading_ease","predicted_quality"]])
-        st.download_button("Download predictions CSV", data=df_out.to_csv(index=False).encode('utf-8'), file_name="predictions_with_quality.csv")
+        loaded = st.session_state['quality_model']
+        clf = None
+        # If the loaded object already has predict, use it
+        if hasattr(loaded, "predict"):
+            clf = loaded
+        # If a dict was saved, try common keys and values to find an estimator
+        elif isinstance(loaded, dict):
+            for key in ("model", "clf", "estimator", "pipeline", "classifier"):
+                if key in loaded and hasattr(loaded[key], "predict"):
+                    clf = loaded[key]
+                    break
+            if clf is None:
+                # fallback: pick the first value that looks like an estimator
+                for v in loaded.values():
+                    if hasattr(v, "predict"):
+                        clf = v
+                        break
+        
+        if clf is not None:
+            X = df_feat[["word_count","sentence_count","flesch_reading_ease"]].fillna(0)
+            try:
+                preds = clf.predict(X)
+                df_out = df_feat.copy()
+                df_out["predicted_quality"] = preds
+                st.subheader("Predicted Quality for all URLs")
+                st.dataframe(df_out[["url","title","word_count","flesch_reading_ease","predicted_quality"]])
+                st.download_button("Download predictions CSV", data=df_out.to_csv(index=False).encode('utf-8'), file_name="predictions_with_quality.csv")
+            except Exception as e:
+                st.error(f"Failed to generate predictions: {e}")
+        else:
+            st.error("Model loaded but no usable estimator with `predict` was found. Please retrain the model.")
     else:
         st.info("Model not trained yet. Click 'Train Quality Model' to train and save the model.")
 
@@ -411,12 +463,41 @@ elif choice == "Live URL Analyzer":
                             st.write(f"- {u} — similarity: {s:.4f}")
                     else:
                         st.info("Dataset embeddings not available; cannot compute similarity.")
-                    # load model and predict
+                    # load model and predict (be defensive: saved file may contain a dict/wrapped object)
                     if os.path.exists(MODEL_FILE):
-                        clf = joblib.load(MODEL_FILE)
-                        X_new = np.array([[scraped.get('word_count',0), s_count, fr]])
-                        pred = clf.predict(X_new)[0]
-                        st.write(f"**Predicted Quality:** {pred}")
+                        try:
+                            loaded = joblib.load(MODEL_FILE)
+                        except Exception as e:
+                            st.error(f"Failed to load model file: {e}")
+                            loaded = None
+
+                        clf = None
+                        if loaded is not None:
+                            # If the loaded object already has predict, use it
+                            if hasattr(loaded, "predict"):
+                                clf = loaded
+                            # If a dict was saved, try common keys and values to find an estimator
+                            elif isinstance(loaded, dict):
+                                for key in ("model", "clf", "estimator", "pipeline", "classifier"):
+                                    if key in loaded and hasattr(loaded[key], "predict"):
+                                        clf = loaded[key]
+                                        break
+                                if clf is None:
+                                    # fallback: pick the first value that looks like an estimator
+                                    for v in loaded.values():
+                                        if hasattr(v, "predict"):
+                                            clf = v
+                                            break
+
+                        if clf is not None:
+                            X_new = np.array([[scraped.get('word_count',0), s_count, fr]])
+                            try:
+                                pred = clf.predict(X_new)[0]
+                                st.write(f"**Predicted Quality:** {pred}")
+                            except Exception as e:
+                                st.error(f"Failed to run prediction: {e}")
+                        else:
+                            st.info("Quality model file loaded but no usable estimator with `predict` was found. Train the model in the 'Quality Model' tab or re-save the estimator as the top-level object in the pickle file.")
                     else:
                         st.info("Quality model not found. Train the model in the 'Quality Model' tab first.")
     st.write("Note: Live scraping depends on the target site's robots policy and network accessibility.")
