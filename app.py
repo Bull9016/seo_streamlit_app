@@ -137,6 +137,36 @@ def load_extracted_csv():
 @st.cache_data
 def compute_features(df_extracted):
     df = df_extracted.copy()
+    # Normalize extracted dataframe: ensure title, body_text, word_count exist
+    if 'body_text' not in df.columns:
+        # Try to extract from html_content if present
+        if 'html_content' in df.columns:
+            titles = []
+            bodies = []
+            wcs = []
+            for html in df['html_content'].fillna(""):
+                t, b, wc = parse_html_to_text(html)
+                titles.append(t)
+                bodies.append(b)
+                wcs.append(wc)
+            df['title'] = titles
+            df['body_text'] = bodies
+            df['word_count'] = wcs
+        else:
+            # No html or body_text: create empty defaults
+            df['title'] = df.get('title', pd.Series([""] * len(df)))
+            df['body_text'] = df.get('body_text', pd.Series([""] * len(df)))
+            df['word_count'] = df.get('word_count', pd.Series([0] * len(df)))
+    else:
+        # Ensure body_text is string
+        df['body_text'] = df['body_text'].fillna("").astype(str)
+        # Ensure title exists
+        if 'title' not in df.columns:
+            df['title'] = ""
+        # Compute word_count if missing or zero
+        if 'word_count' not in df.columns or df['word_count'].isnull().all():
+            df['word_count'] = df['body_text'].apply(lambda t: len(t.split()) if isinstance(t, str) and t.strip() else 0)
+
     # sentence_count
     df["sentence_count"] = df["body_text"].apply(lambda t: len(sent_tokenize(t)) if isinstance(t, str) and t.strip() else 0)
     # flesch_reading_ease
@@ -230,24 +260,65 @@ df_raw = load_dataset()
 
 if choice == "Data Processing":
     st.header("1. Data Processing & Parsing")
-    st.markdown("Load `data.csv` (columns: url, html_content). This step extracts title, body text and word count.")
-    if df_raw.empty:
-        st.warning("No data loaded. Upload or place data.csv at /mnt/data/data.csv.")
-        uploaded = st.file_uploader("Upload data.csv", type=["csv"])
-        if uploaded:
+    st.markdown("Load your data file (CSV format with columns: url, html_content/body_text). Maximum file size: 100MB")
+    
+    # File upload section with size limit (100MB = 100 * 1024 * 1024 bytes)
+    MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        uploaded = st.file_uploader("Upload CSV file", type=["csv"])
+    with col2:
+        file_id = st.text_input("File ID (optional)", help="Assign a custom ID to your file")
+    
+    if uploaded:
+        # Check file size
+        file_size = len(uploaded.getvalue())
+        if file_size > MAX_FILE_SIZE:
+            st.error(f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds the 100MB limit.")
+        else:
             try:
                 df_raw = pd.read_csv(uploaded)
-                st.success("Uploaded dataset loaded.")
+                if file_id:  # Add file ID if provided
+                    df_raw['file_id'] = file_id
+                st.success(f"Uploaded dataset loaded successfully. Size: {file_size / 1024 / 1024:.1f}MB")
             except Exception as e:
                 st.error(f"Failed to read uploaded CSV: {e}")
-    st.write("Raw dataset preview:")
-    st.dataframe(df_raw.head(20))
-    if st.button("Run Extraction"):
-        with st.spinner("Parsing HTML and extracting text..."):
-            extracted = process_and_extract(df_raw)
-        st.success(f"Extraction completed. Saved to `{EXTRACTED_CSV}`.")
-        st.dataframe(extracted.head(50))
-        st.download_button("Download extracted_content.csv", data=extracted.to_csv(index=False).encode('utf-8'), file_name=EXTRACTED_CSV)
+    
+    if not df_raw.empty:
+        st.write("Dataset preview:")
+        preview_cols = ['file_id'] if 'file_id' in df_raw.columns else []
+        preview_cols.extend(['url', 'html_content'] if 'html_content' in df_raw.columns else ['url', 'body_text'])
+        st.dataframe(df_raw[preview_cols].head(20))
+        
+        if st.button("Process Data"):
+            with st.spinner("Processing data..."):
+                if 'html_content' in df_raw.columns:
+                    # Extract from HTML if html_content is present
+                    extracted = process_and_extract(df_raw)
+                else:
+                    # If body_text is already present, use it directly
+                    extracted = df_raw.copy()
+                    if 'word_count' not in extracted.columns:
+                        extracted['word_count'] = extracted['body_text'].str.split().str.len()
+                
+                # Preserve file_id if it exists
+                if 'file_id' in df_raw.columns:
+                    extracted['file_id'] = df_raw['file_id']
+                    
+            st.success(f"Processing completed. Saved to `{EXTRACTED_CSV}`.")
+            extracted.to_csv(EXTRACTED_CSV, index=False)
+            
+            # Show preview with file_id if it exists
+            preview_cols = ['file_id'] if 'file_id' in extracted.columns else []
+            preview_cols.extend(['url', 'title', 'body_text', 'word_count'])
+            st.dataframe(extracted[preview_cols].head(50))
+            
+            st.download_button(
+                "Download processed data", 
+                data=extracted.to_csv(index=False).encode('utf-8'),
+                file_name=EXTRACTED_CSV
+            )
 
 elif choice == "Feature Analysis":
     st.header("2. Feature Engineering & Visualization")
@@ -301,45 +372,108 @@ elif choice == "Feature Analysis":
 
 elif choice == "Duplicate Detector":
     st.header("3. Duplicate & Thin Content Detector")
-    # Ensure features and embeddings exist
+    st.markdown("Use this page to find duplicates in your dataset or compare a live URL against the dataset.")
+
+    # Load or compute extracted/features/embeddings
     if os.path.exists(EXTRACTED_CSV):
         extracted = pd.read_csv(EXTRACTED_CSV)
     else:
         extracted = process_and_extract(df_raw)
-    if 'df_features' not in st.session_state:
-        with st.spinner("Computing features and embeddings first..."):
+
+    # Ensure features and embeddings exist in session
+    if 'df_features' not in st.session_state or 'embeddings' not in st.session_state:
+        with st.spinner("Computing features and embeddings..."):
             df_feat, embeddings = compute_features(extracted)
             st.session_state['df_features'] = df_feat
-            st.session_state['embeddings'] = embeddings
+            st.session_state['embeddings'] = np.array(embeddings)
+
     df_feat = st.session_state['df_features']
-    embeddings = st.session_state['embeddings']
+    embeddings = np.array(st.session_state.get('embeddings', []))
+
+    # helper: validate embeddings
+    def embeddings_valid(emb):
+        try:
+            emb = np.array(emb)
+            if emb.size == 0:
+                return False
+            if emb.ndim != 2:
+                return False
+            # more than one vector
+            if emb.shape[0] < 1:
+                return False
+            # check if all rows are nearly identical -> bad encoding
+            if emb.shape[0] > 1 and np.allclose(emb, emb[0]):
+                return False
+            return True
+        except Exception:
+            return False
+
+    # If embeddings look invalid, recompute them explicitly
+    if not embeddings_valid(embeddings):
+        st.warning("Dataset embeddings look invalid or uniform — recomputing embeddings now.")
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        embeddings = model.encode(df_feat['body_text'].fillna("").astype(str).tolist(), show_progress_bar=True)
+        embeddings = np.array(embeddings)
+        st.session_state['embeddings'] = embeddings
+
+    # Thin content table
     st.subheader("Thin Content (word_count < 500)")
     thin = df_feat[df_feat['word_count'] < 500][['url','title','word_count']]
     st.dataframe(thin)
-    st.subheader("Duplicate Detection")
-    sim_matrix = compute_similarity_matrix(embeddings)
-    st.write("Adjust the similarity threshold to list pairs considered duplicates.")
-    thresh = st.slider("Similarity Threshold", min_value=0.70, max_value=1.00, value=0.85, step=0.01)
-    # find pairs above threshold (exclude self matches)
-    pairs = []
-    n = sim_matrix.shape[0]
-    for i in range(n):
-        for j in range(i+1, n):
-            if sim_matrix[i,j] >= thresh:
-                pairs.append((df_feat.loc[i,'url'], df_feat.loc[j,'url'], float(sim_matrix[i,j])))
-    if pairs:
-        dup_df = pd.DataFrame(pairs, columns=["url1","url2","similarity"])
-        st.dataframe(dup_df.sort_values("similarity", ascending=False))
-        st.download_button("Download duplicate pairs CSV", data=dup_df.to_csv(index=False).encode('utf-8'), file_name="duplicate_pairs.csv")
-    else:
-        st.info("No duplicate pairs found at this threshold.")
-    st.subheader("Similarity Matrix Heatmap")
-    if sim_matrix.size:
-        fig, ax = plt.subplots(figsize=(8,6))
-        sns.heatmap(sim_matrix, ax=ax)
-        st.pyplot(fig)
-    else:
-        st.info("Similarity matrix is empty.")
+
+    # Live-URL based duplicate detection (preferred)
+    st.subheader("Compare a Live URL against the dataset")
+    live_url = st.text_input("Enter a live URL to compare (optional)")
+    if st.button("Analyze Live URL"):
+        if not live_url.strip():
+            st.error("Please enter a valid URL to analyze.")
+        else:
+            with st.spinner("Scraping and computing similarity..."):
+                scraped = safe_scrape_url(live_url.strip())
+                if 'error' in scraped:
+                    st.error(f"Failed to fetch URL: {scraped['error']}")
+                else:
+                    # ensure embeddings exist and valid
+                    if not embeddings_valid(embeddings):
+                        st.error("Dataset embeddings are not available or invalid; compute features first.")
+                    else:
+                        model = SentenceTransformer('all-MiniLM-L6-v2')
+                        new_emb = model.encode([scraped.get('body_text','') or ""], show_progress_bar=False)
+                        sims = cosine_similarity(np.array(new_emb), embeddings)[0]
+                        top_idx = sims.argsort()[-10:][::-1]
+                        match_rows = []
+                        for i in top_idx:
+                            match_rows.append({'url': df_feat.loc[i,'url'], 'title': df_feat.loc[i,'title'], 'similarity': float(sims[i]), 'word_count': int(df_feat.loc[i,'word_count'])})
+                        st.subheader("Top matches from dataset")
+                        st.dataframe(pd.DataFrame(match_rows))
+
+    st.markdown("---")
+    # Dataset vs Dataset duplicate detection (opt-in)
+    st.subheader("Find duplicate pairs within dataset (optional)")
+    if st.button("Find duplicate pairs in dataset"):
+        if not embeddings_valid(embeddings):
+            st.error("Dataset embeddings are not available or invalid; compute features first.")
+        else:
+            with st.spinner("Computing similarity matrix and extracting pairs..."):
+                sim_matrix = compute_similarity_matrix(embeddings)
+                st.write("Adjust the similarity threshold to list pairs considered duplicates.")
+                thresh = st.slider("Similarity Threshold", min_value=0.70, max_value=1.00, value=0.85, step=0.01, key='dup_thresh')
+                pairs = []
+                n = sim_matrix.shape[0]
+                for i in range(n):
+                    for j in range(i+1, n):
+                        if sim_matrix[i,j] >= thresh:
+                            pairs.append((df_feat.loc[i,'url'], df_feat.loc[j,'url'], float(sim_matrix[i,j])))
+                if pairs:
+                    dup_df = pd.DataFrame(pairs, columns=["url1","url2","similarity"]).sort_values("similarity", ascending=False)
+                    st.dataframe(dup_df)
+                    st.download_button("Download duplicate pairs CSV", data=dup_df.to_csv(index=False).encode('utf-8'), file_name="duplicate_pairs.csv")
+                else:
+                    st.info("No duplicate pairs found at this threshold.")
+                st.subheader("Similarity Matrix Heatmap")
+                fig, ax = plt.subplots(figsize=(8,6))
+                sns.heatmap(sim_matrix, ax=ax)
+                st.pyplot(fig)
 
 elif choice == "Quality Model":
     st.header("4. Content Quality Scoring (Machine Learning)")
