@@ -83,8 +83,4 @@ streamlit run app.py
 
 ## Live Demo
 
-Access the live demo at: [SEO Content Analyzer Demo](https://seo-content-detector.streamlit.app/)
-
-## License
-
-MIT License - Feel free to use and modify with attribution.
+Access the live demo at: [SEO Content Analyzer Demo](https://daawhpkpszaag7t3qdhhqv.streamlit.app/)
