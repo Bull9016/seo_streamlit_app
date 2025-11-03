@@ -224,9 +224,12 @@ elif choice == "Feature Analysis":
     st.header("2. Feature Engineering & Visualization")
     st.markdown("Compute sentence count, Flesch Reading Ease, top keywords and embeddings.")
     # Load extracted data if exists else run extraction
-    if os.path.exists(EXTRACTED_CSV):
-        extracted = pd.read_csv(EXTRACTED_CSV)
-    else:
+    try:
+        if os.path.exists(EXTRACTED_CSV):
+            extracted = pd.read_csv(EXTRACTED_CSV)
+        else:
+            raise FileNotFoundError
+    except (FileNotFoundError, pd.errors.EmptyDataError):
         extracted = process_and_extract(df_raw)
     st.write("Extracted content preview:")
     st.dataframe(extracted.head(20))
