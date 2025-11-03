@@ -10,3 +10,7 @@ seaborn
 requests
 joblib
 wordcloud
+spacy
+textblob
+plotly
+numpy>=1.20.0
