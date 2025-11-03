@@ -5,8 +5,8 @@ A powerful Streamlit-based tool for comprehensive SEO content analysis. Combines
 ## Quick Start
 
 ```bash
-git clone https://github.com/Bull9016/seo-content-detector
-cd seo-content-detector
+git clone https://github.com/Bull9016/seo_streamlit_app/
+cd seo_streamlit_app
 pip install -r requirements.txt
 streamlit run app.py
 ```
